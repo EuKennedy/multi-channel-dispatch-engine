@@ -194,6 +194,47 @@ The codebase is ready for it with two swaps:
 Everything else — the dispatch loop, recovery, state machine — already
 treats the DB as the source of truth.
 
+## Design decisions (why the engine looks the way it looks)
+
+Every choice in this codebase was made against a specific production failure.
+The deep rationale lives in [`docs/anti-ban.md`](./docs/anti-ban.md) and
+[`docs/architecture.md`](./docs/architecture.md); the short version:
+
+- **Single-writer per identity.** Two concurrent campaigns on the same
+  WhatsApp number is the #1 cause of banned sessions in the SaaS this was
+  extracted from. Enforced by an atomic in-process lock with a DB
+  double-check.
+- **Randomized intervals, always.** Uniform timing is the cheapest
+  bot-detection signal. Every send waits `random(minInterval, maxInterval)`;
+  `minInterval` has an 8s hard floor regardless of user config.
+- **Warmup window on every step.** The first 5 sends after a step starts
+  use a 2.5× multiplier. Full-speed bursts right after a reconnect are the
+  most recognizable bot pattern.
+- **Mandatory pause between batches.** Continuous streams trip
+  volume-over-window heuristics even at slow rates. Defaults: pause 120s
+  after every 10 sends; hard cap 20 per batch, hard floor 60s pause.
+- **Safe-hours awareness.** Warn (or optionally block) sends outside
+  07:00–22:00 local. Off-hours volume is a heuristic signal on its own.
+- **Rate-limit cooldown = 5 minutes.** Shorter cooldowns make bans
+  faster, not slower. When the platform asks you to slow down, you
+  overshoot the request.
+- **Auto-pause after 5 consecutive failures.** Five in a row almost
+  always means the identity is unhealthy. Resume is manual — no silent
+  retry loop.
+- **Disconnection = pause the campaign, not the message.** Queued sends
+  on a disconnected session turn into a burst on reconnect, which is
+  exactly the pattern we're trying to avoid.
+- **Progress checkpoint every 5 sends.** Survives crashes, deploys,
+  container restarts. Resume picks up from `lastProcessedLogId`, not
+  from zero.
+- **DB is the source of truth.** In-memory state (session locks,
+  dispatch handles) is rebuilt on boot via `recoverStuckWork()`. No
+  magic state lives outside the database.
+
+Most of these sit behind named constants at the top of
+[`src/constants.ts`](./src/constants.ts). The numbers aren't arbitrary —
+they're the product of lost identities.
+
 ## Status
 
 MIT licensed. Used in production for bulk WhatsApp campaigns sending
@@ -204,10 +245,11 @@ Issues and PRs welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## Documentation
 
+- [**Anti-ban controls**](./docs/anti-ban.md) — the 8 principles behind
+  the engine, with problem/solution/trade-off for each. **Start here**
+  to understand the "why".
 - [Architecture](./docs/architecture.md) — moving parts, state machines,
   extension points.
-- [Anti-ban controls](./docs/anti-ban.md) — what the engine does to keep
-  identities healthy.
 - [Basic example](./examples/basic) — runnable end-to-end demo.
 
 ## License
