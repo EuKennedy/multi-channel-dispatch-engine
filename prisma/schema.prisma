@@ -1,0 +1,166 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Session
+// A connected channel identity (e.g. a WhatsApp number, an SMS sender id).
+// The engine locks one active campaign per session to protect the identity.
+// ============================================================================
+model Session {
+  id        String   @id @default(cuid())
+  name      String
+  channel   String   // "whatsapp" | "sms" | "email" | custom
+  status    String   @default("DISCONNECTED")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@index([status])
+}
+
+// ============================================================================
+// Campaign
+// The top-level unit of work. Contains 1..N Steps; each Step defines its own
+// message and schedule. Multi-step campaigns let you build drip sequences.
+// ============================================================================
+model Campaign {
+  id     String @id @default(cuid())
+  name   String
+  status String @default("DRAFT")
+
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Anti-ban config (hard minimums enforced at runtime)
+  minInterval Int @default(8)
+  maxInterval Int @default(25)
+  batchSize   Int @default(10)
+  batchPause  Int @default(120)
+
+  // Counters (cached sum of all steps)
+  totalRecipients Int @default(0)
+  sentCount       Int @default(0)
+  failedCount     Int @default(0)
+
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  steps        CampaignStep[]
+  dispatchLogs DispatchLog[]
+  recipients   CampaignRecipient[]
+
+  @@index([status])
+  @@index([sessionId])
+  @@index([sessionId, status])
+}
+
+// ============================================================================
+// CampaignRecipient
+// The list of targets for a campaign. Stored separately from logs so the
+// same recipient can be referenced by multiple steps without duplication.
+// ============================================================================
+model CampaignRecipient {
+  id         String @id @default(cuid())
+  campaignId String
+  address    String
+  name       String?
+  order      Int    @default(0)
+  metadata   String? // JSON-encoded extra fields (opaque to the engine)
+
+  campaign     Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  dispatchLogs DispatchLog[]
+
+  @@unique([campaignId, address])
+  @@index([campaignId])
+}
+
+// ============================================================================
+// CampaignStep
+// A stage of a campaign. Steps run sequentially by stepOrder. Each step can
+// carry a different message and its own schedule / recurrence.
+// lastProcessedLogId is the resume cursor — the engine uses it to continue
+// from where it left off after a crash or restart.
+// ============================================================================
+model CampaignStep {
+  id         String @id @default(cuid())
+  campaignId String
+  stepOrder  Int    @default(0)
+  name       String?
+  status     String @default("DRAFT")
+
+  messageType       String  @default("TEXT")
+  messageText       String? @db.Text
+  mediaUrl          String?
+  mediaCaption      String? @db.Text
+  templateName      String?
+  templateLanguage  String?
+  templateComponents String? @db.Text // JSON-encoded
+
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Recurrence (null = runs once)
+  recurrenceType  String?
+  recurrenceCount Int     @default(0)
+  nextRunAt       DateTime?
+
+  // Per-step counters
+  sentCount   Int @default(0)
+  failedCount Int @default(0)
+
+  // Crash-recovery cursor — id of the last DispatchLog that was processed.
+  // On restart, the engine resumes from the record created right after this one.
+  lastProcessedLogId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaign     Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  dispatchLogs DispatchLog[]
+
+  @@index([campaignId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([nextRunAt])
+  @@index([campaignId, status])
+}
+
+// ============================================================================
+// DispatchLog
+// One row per (step, recipient). This is the audit trail and also the queue:
+// PENDING records are the work yet to be done.
+// ============================================================================
+model DispatchLog {
+  id          String   @id @default(cuid())
+  campaignId  String
+  stepId      String?
+  recipientId String
+  status      String   @default("PENDING")
+  messageId   String?  // Provider-assigned id after successful send
+  errorCode   String?
+  errorMsg    String?  @db.Text
+  sentAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  campaign  Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  step      CampaignStep?     @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  recipient CampaignRecipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([stepId])
+  @@index([status])
+  @@index([campaignId, status])
+  @@index([stepId, status])
+}
