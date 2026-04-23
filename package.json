@@ -1,0 +1,63 @@
+{
+  "name": "multi-channel-dispatch-engine",
+  "version": "0.1.0",
+  "description": "Production-grade dispatch engine for sending messages at scale across multiple channels with anti-ban protections and crash recovery.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "example": "tsx examples/basic/index.ts"
+  },
+  "keywords": [
+    "dispatch",
+    "queue",
+    "rate-limit",
+    "whatsapp",
+    "sms",
+    "email",
+    "bulk-send",
+    "scheduler",
+    "prisma",
+    "typescript"
+  ],
+  "author": "Kennedy Rodrigues",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EuKennedy/multi-channel-dispatch-engine.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "prisma/schema.prisma",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@prisma/client": "^5.22.0"
+  },
+  "peerDependencies": {
+    "@prisma/client": "^5.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitest/coverage-v8": "^1.3.0",
+    "eslint": "^8.57.0",
+    "prisma": "^5.22.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.3.0"
+  }
+}
