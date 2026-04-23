@@ -121,18 +121,10 @@ export class Scheduler {
     for (const s of due) {
       if (isSessionLocked(s.campaign.sessionId)) continue;
 
-      // Idempotent claim: only one tick wins the step.
-      const claim = await this.prisma.campaignStep.updateMany({
-        where: { id: s.id, status: 'SCHEDULED' },
-        data: { status: 'RUNNING' }, // temporary — startStep will set it again
-      });
-      if (claim.count === 0) continue;
-      // Revert — startStep is the single source of truth for the transition.
-      await this.prisma.campaignStep.update({
-        where: { id: s.id },
-        data: { status: 'SCHEDULED' },
-      });
-
+      // The session lock is the mutual-exclusion primitive: if startStep
+      // succeeds it holds the lock for the step's lifetime, so any other
+      // tick that reads the same step will be rejected by the lock check
+      // inside acquireSessionLock. No claim-then-revert dance needed.
       try {
         await this.engine.startStep(s.id, s.campaign.sessionId);
       } catch (err) {
@@ -157,16 +149,6 @@ export class Scheduler {
 
     for (const s of due) {
       if (isSessionLocked(s.campaign.sessionId)) continue;
-
-      const claim = await this.prisma.campaignStep.updateMany({
-        where: { id: s.id, status: 'SCHEDULED' },
-        data: { status: 'RUNNING' },
-      });
-      if (claim.count === 0) continue;
-      await this.prisma.campaignStep.update({
-        where: { id: s.id },
-        data: { status: 'SCHEDULED' },
-      });
 
       try {
         await this.engine.startStep(s.id, s.campaign.sessionId);

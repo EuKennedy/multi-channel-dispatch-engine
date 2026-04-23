@@ -240,47 +240,56 @@ export class DispatchEngine {
 
     // Atomically flip the step to RUNNING, ensure the campaign is RUNNING,
     // and materialize the dispatch queue for any recipients that don't
-    // already have a log row.
-    await this.prisma.$transaction(async (tx) => {
-      await tx.campaignStep.update({
-        where: { id: stepId },
-        data: { status: 'RUNNING', startedAt: new Date() },
-      });
-      await tx.campaign.update({
-        where: { id: step.campaignId },
-        data: {
-          status: 'RUNNING',
-          startedAt: step.campaign.startedAt ?? new Date(),
-          totalRecipients: step.campaign.recipients.length,
-        },
-      });
+    // already have a log row. If this transaction throws, we must unwind
+    // both the registry entry and the session lock — otherwise the session
+    // stays permanently blocked until the next process restart.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.campaignStep.update({
+          where: { id: stepId },
+          data: { status: 'RUNNING', startedAt: new Date() },
+        });
+        await tx.campaign.update({
+          where: { id: step.campaignId },
+          data: {
+            status: 'RUNNING',
+            startedAt: step.campaign.startedAt ?? new Date(),
+            totalRecipients: step.campaign.recipients.length,
+          },
+        });
 
-      const existing = await tx.dispatchLog.findMany({
-        where: { campaignId: step.campaignId, stepId },
-        select: { recipientId: true, status: true },
+        const existing = await tx.dispatchLog.findMany({
+          where: { campaignId: step.campaignId, stepId },
+          select: { recipientId: true, status: true },
+        });
+        const alreadyQueued = new Set(
+          existing.filter((l) => l.status !== 'FAILED').map((l) => l.recipientId),
+        );
+
+        const toCreate = step.campaign.recipients
+          .filter((r) => !alreadyQueued.has(r.id))
+          .map((r) => ({
+            campaignId: step.campaignId,
+            stepId,
+            recipientId: r.id,
+            status: 'PENDING' as const,
+          }));
+
+        if (toCreate.length > 0) {
+          await tx.dispatchLog.createMany({ data: toCreate });
+        }
       });
-      const alreadyQueued = new Set(
-        existing.filter((l) => l.status !== 'FAILED').map((l) => l.recipientId),
-      );
-
-      const toCreate = step.campaign.recipients
-        .filter((r) => !alreadyQueued.has(r.id))
-        .map((r) => ({
-          campaignId: step.campaignId,
-          stepId,
-          recipientId: r.id,
-          status: 'PENDING' as const,
-        }));
-
-      if (toCreate.length > 0) {
-        await tx.dispatchLog.createMany({ data: toCreate });
-      }
-    });
+    } catch (err) {
+      registry.unregister(stepId);
+      if (lockAcquiredHere) releaseSessionLock(sessionId);
+      throw err;
+    }
 
     // Non-blocking send loop. Errors are caught and logged — never thrown
     // back to the caller, since this returns after kickoff.
     this.runStepLoop(stepId, sessionId, abortController.signal).catch((err) => {
       this.log.error(`step ${stepId} loop crashed`, err);
+      registry.unregister(stepId);
       if (lockAcquiredHere) releaseSessionLock(sessionId);
     });
   }
@@ -362,9 +371,7 @@ export class DispatchEngine {
       const recipient: Recipient = {
         id: log.recipient.id,
         address: log.recipient.address,
-        metadata: log.recipient.metadata
-          ? JSON.parse(log.recipient.metadata)
-          : undefined,
+        metadata: parseMetadata(log.recipient.metadata),
       };
 
       let result: SendResult;
@@ -606,13 +613,21 @@ export class DispatchEngine {
     return p;
   }
 
+  /**
+   * Aggregate per-campaign counters from the dispatch log table.
+   *
+   * Earlier versions summed `step.sentCount` / `step.failedCount`, but those
+   * are per-step caches updated on a 5-send interval. When two steps of the
+   * same campaign are running (sequentially but overlapping at the edges)
+   * the sum-of-cached-counters can lag reality. DispatchLog is the ground
+   * truth: one row per (step, recipient), status updated in-transaction
+   * with the send.
+   */
   private async rollUpCampaignCounters(campaignId: string): Promise<void> {
-    const steps = await this.prisma.campaignStep.findMany({
-      where: { campaignId },
-      select: { sentCount: true, failedCount: true },
-    });
-    const sentCount = steps.reduce((s, x) => s + x.sentCount, 0);
-    const failedCount = steps.reduce((s, x) => s + x.failedCount, 0);
+    const [sentCount, failedCount] = await Promise.all([
+      this.prisma.dispatchLog.count({ where: { campaignId, status: 'SENT' } }),
+      this.prisma.dispatchLog.count({ where: { campaignId, status: 'FAILED' } }),
+    ]);
     await this.prisma.campaign.update({
       where: { id: campaignId },
       data: { sentCount, failedCount },
@@ -636,5 +651,23 @@ export class DispatchEngine {
     ]);
     registry.unregister(stepId);
     releaseSessionLock(sessionId);
+  }
+}
+
+/**
+ * Safely parse opaque JSON metadata stored against a recipient.
+ * Bad JSON must never crash the dispatch loop — a single malformed row
+ * would take down every future send of the step.
+ */
+function parseMetadata(raw: string | null): Record<string, unknown> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return undefined;
+  } catch {
+    return undefined;
   }
 }
